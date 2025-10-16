@@ -80,6 +80,39 @@ class AdvancedDetector:
             st.error(f"图片检测失败: {e}")
             return []
 
+    def mock_detect(self, image):
+        """模拟检测结果 - 用于测试界面"""
+        height, width = image.shape[:2]
+        detections = []
+
+        # 生成2-4个随机检测框
+        import random
+        num_detections = random.randint(2, 4)
+
+        for i in range(num_detections):
+            # 随机位置和大小
+            x1 = random.randint(50, width - 150)
+            y1 = random.randint(50, height - 150)
+            x2 = x1 + random.randint(80, 200)
+            y2 = y1 + random.randint(80, 200)
+
+            confidence = round(0.7 + random.random() * 0.25, 2)  # 0.7-0.95
+
+            # 随机选择松花时期
+            class_id = random.randint(0, 2)
+            class_info = PINE_FLOWER_CLASSES[class_id]
+
+            detections.append({
+                'bbox': [x1, y1, x2, y2],
+                'confidence': confidence,
+                'class_name': class_info['name'],
+                'class_chinese': class_info['chinese'],
+                'class_id': class_id,
+                'color': class_info['color']
+            })
+
+        return detections
+
     def draw_detections(self, image, detections):
         """绘制检测框"""
         for det in detections:
@@ -164,68 +197,68 @@ def main():
                 with col1:
                     st.subheader("原图")
                     # 显示原图
-                    image = cv2.imread(tmp_path)Image = cv2.imread（tmp_path）
+                    image = cv2.imread(tmp_path)
                     if image is not None:
                         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        st.image(image_rgb, use_column_width=True)st.image   图像 (image_rgb use_column_width = True   真正的)
+                        st.image(image_rgb, use_column_width=True)
                     
                         # 执行检测
                         with st.spinner("正在检测松花物候期..."):
-                            detections = detector.detect_image(image)Detections = detector.detect_image（图像）
+                            detections = detector.detect_image(image)
                         
                         # 绘制检测结果
-                        result_image = detector.draw_detections(image.copy(), detections)Result_image = detector.draw_detections(图像；副本(),检测)
-                        result_image_rgb = cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)Result_image_rgb = cv2。cvtColor (result_image cv2。COLOR_BGR2RGB)
+                        result_image = detector.draw_detections(image.copy(), detections)
+                        result_image_rgb = cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)
                         
-                        with col2:   col2:
+                        with col2:
                             st.subheader("检测结果")
-                            st.image(result_image_rgb, use_column_width=True)st.image   图像 (result_image_rgb use_column_width = True   真正的)
+                            st.image(result_image_rgb, use_column_width=True)
                         
                         # 显示统计信息
-                        stats = detector.get_detection_statistics(detections)Stats = detector.get_detection_statistics（检测）
+                        stats = detector.get_detection_statistics(detections)
                         
                         st.subheader("检测统计")
-                        col3, col4, col5 = st.columns(3)Col3, col4, col5 = st.columns(3)
+                        col3, col4, col5 = st.columns(3)
                         
-                        with col3:   col3:
+                        with col3:
                             st.metric("总检测数", stats['total_count'])
                         
-                        with col4:   col4:
-                            stages = list(stats['by_stage_chinese'].keys())阶段= list（stats['by_stage_chinese'   “by_stage_chinese”].keys   键()）
-                            if   如果 stages:
-                                main_stage = max(stats['by_stage_chinese'], key=stats['by_stage_chinese'].get)Main_stage = max（stats['by_stage_chinese'   “by_stage_chinese”], key=stats['by_stage_chinese'   “by_stage_chinese”].get）
+                        with col4:
+                            stages = list(stats['by_stage_chinese'].keys())
+                            if stages:
+                                main_stage = max(stats['by_stage_chinese'], key=stats['by_stage_chinese'].get)
                                 st.metric("主要物候期", main_stage)
                         
-                        with col5:   col5:
+                        with col5:
                             if detections:
-                                avg_confidence = np.mean([det['confidence'] for det in detections])Avg_confidence = np。平均值（[det[‘置信度’]在检测中的det]）
+                                avg_confidence = np.mean([det['confidence'] for det in detections])
                                 st.metric("平均置信度", f"{avg_confidence:.2f}")
                         
                         # 详细检测结果
                         st.subheader("详细检测结果")
-                        if detections:   如果检测:
-                            for i, det in enumerate(detections):对于i， det in   在 enumerate   列举(detections)：
-                                with st.expander(f"检测目标 {i+1}: {det['class_chinese']} (置信度: {det['confidence']:.2f})"):with   与 st.expander   扩张器(f"检测目标 {i 1}: {det['class_chinese'   “class_chinese”]} (置信度: {det['confidence'   “信心”]:.2f})"):
-                                    st.json(det)   st.json(依据)
-                        else:   其他:
+                        if detections:
+                            for i, det in enumerate(detections):
+                                with st.expander(f"检测目标 {i+1}: {det['class_chinese']} (置信度: {det['confidence']:.2f})"):
+                                    st.json(det)
+                        else:
                             st.info("未检测到松花目标")
                     
-                else:   其他:
+                else:
                     st.error("无法读取图片文件")
 
-        except Exception as e:   例外情况如下：
+        except Exception as e:
             st.error(f"处理文件时出错: {e}")
             logger.error(f"处理文件失败: {e}")
         
-        finally:   最后:
+        finally:
             # 清理临时文件
-            try:   试一试:
+            try:
                 os.unlink(tmp_path)
-            except:   除了:
-                pass   通过
+            except:
+                pass
 
     # 侧边栏信息
-    with st.sidebar:   st.sidebar   侧边栏:
+    with st.sidebar:
         st.header("关于")
         st.markdown("""
         ### 松花物候期检测系统
@@ -240,10 +273,10 @@ def main():
         """)
         
         st.header("模型状态")
-        if detector.model is not None:如果探测器。model不是None：
+        if detector.model is not None:
             st.success("✅ 模型加载成功")
-        else:   其他:
+        else:
             st.error("❌ 模型加载失败")
 
-if __name__ == '__main__':   如果__name__ == '__main__'   “__main__ '：
+if __name__ == '__main__':
     main()
