@@ -1,5 +1,4 @@
 import streamlit as st
-import cv2
 import numpy as np
 import torch
 from datetime import datetime
@@ -9,6 +8,8 @@ import os
 from collections import defaultdict
 from ultralytics import YOLO
 import tempfile
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 # 配置页面
 st.set_page_config(
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 # 松花时期类别映射
 PINE_FLOWER_CLASSES = {
     0: {'name': 'elongation stage', 'color': (0, 255, 0), 'chinese': '伸长期'},
-    1: {'name': 'ripening stage', 'color': (0, 165, 255), 'chinese': '成熟期'},
-    2: {'name': 'decline stage', 'color': (0, 0, 255), 'chinese': '衰退期'}
+    1: {'name': 'ripening stage', 'color': (255, 165, 0), 'chinese': '成熟期'},
+    2: {'name': 'decline stage', 'color': (255, 0, 0), 'chinese': '衰退期'}
 }
 
 class AdvancedDetector:
@@ -82,7 +83,7 @@ class AdvancedDetector:
 
     def mock_detect(self, image):
         """模拟检测结果 - 用于测试界面"""
-        height, width = image.shape[:2]
+        width, height = image.size
         detections = []
 
         # 生成2-4个随机检测框
@@ -114,7 +115,15 @@ class AdvancedDetector:
         return detections
 
     def draw_detections(self, image, detections):
-        """绘制检测框"""
+        """绘制检测框 - 使用PIL"""
+        draw = ImageDraw.Draw(image)
+        
+        # 尝试使用默认字体
+        try:
+            font = ImageFont.load_default()
+        except:
+            font = None
+
         for det in detections:
             x1, y1, x2, y2 = map(int, det['bbox'])
             conf = det['confidence']
@@ -122,16 +131,24 @@ class AdvancedDetector:
             class_name = det.get('class_chinese', det['class_name'])
 
             # 画框
-            cv2.rectangle(image, (x1, y1), (x2, y2), color, 3)
+            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
 
             # 画标签背景
             label = f"{class_name} {conf:.2f}"
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-            cv2.rectangle(image, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1)
+            if font:
+                bbox = draw.textbbox((0, 0), label, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+            else:
+                text_width, text_height = 100, 20
+
+            draw.rectangle([x1, y1 - text_height - 10, x1 + text_width, y1], fill=color)
 
             # 画文字
-            cv2.putText(image, label, (x1, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            if font:
+                draw.text((x1, y1 - text_height - 5), label, fill=(255, 255, 255), font=font)
+            else:
+                draw.text((x1, y1 - text_height - 5), label, fill=(255, 255, 255))
 
         return image
 
@@ -164,97 +181,77 @@ def load_detector():
 # 主应用
 def main():
     st.title("🌲 松花物候期检测平台")
-    st.markdown("上传松花图片或视频，自动识别物候期（伸长期、成熟期、衰退期）")
+    st.markdown("上传松花图片，自动识别物候期（伸长期、成熟期、衰退期）")
 
     # 初始化检测器
     detector = load_detector()
 
     # 文件上传
     uploaded_file = st.file_uploader(
-        "选择图片或视频文件", 
-        type=['png', 'jpg', 'jpeg', 'mp4', 'avi', 'mov'],
-        help="支持格式: PNG, JPG, JPEG, MP4, AVI, MOV"
+        "选择图片文件", 
+        type=['png', 'jpg', 'jpeg'],
+        help="支持格式: PNG, JPG, JPEG"
     )
 
     if uploaded_file is not None:
-        # 保存上传的文件到临时文件
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            tmp_path = tmp_file.name
-
         try:
-            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
-
-            if file_ext in ['.mp4', '.avi', '.mov']:
-                # 视频处理
-                st.warning("视频处理功能在演示版本中可能受限")
-                st.video(uploaded_file)
+            # 使用PIL打开图片
+            image = Image.open(uploaded_file)
+            
+            # 图片处理
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("原图")
+                st.image(image, use_column_width=True)
+            
+            with col2:
+                st.subheader("检测结果")
                 
+                # 执行检测
+                with st.spinner("正在检测松花物候期..."):
+                    detections = detector.detect_image(image)
+                
+                # 绘制检测结果
+                result_image = detector.draw_detections(image.copy(), detections)
+                st.image(result_image, use_column_width=True)
+            
+            # 显示统计信息
+            stats = detector.get_detection_statistics(detections)
+            
+            st.subheader("检测统计")
+            col3, col4, col5 = st.columns(3)
+            
+            with col3:
+                st.metric("总检测数", stats['total_count'])
+            
+            with col4:
+                stages = list(stats['by_stage_chinese'].keys())
+                if stages:
+                    main_stage = max(stats['by_stage_chinese'], key=stats['by_stage_chinese'].get)
+                    st.metric("主要物候期", main_stage)
+                else:
+                    st.metric("主要物候期", "无")
+            
+            with col5:
+                if detections:
+                    avg_confidence = np.mean([det['confidence'] for det in detections])
+                    st.metric("平均置信度", f"{avg_confidence:.2f}")
+                else:
+                    st.metric("平均置信度", "0.00")
+            
+            # 详细检测结果
+            st.subheader("详细检测结果")
+            if detections:
+                for i, det in enumerate(detections):
+                    with st.expander(f"检测目标 {i+1}: {det['class_chinese']} (置信度: {det['confidence']:.2f})"):
+                        st.json(det)
             else:
-                # 图片处理
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("原图")
-                    # 显示原图
-                    image = cv2.imread(tmp_path)
-                    if image is not None:
-                        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                        st.image(image_rgb, use_column_width=True)
-                    
-                        # 执行检测
-                        with st.spinner("正在检测松花物候期..."):
-                            detections = detector.detect_image(image)
-                        
-                        # 绘制检测结果
-                        result_image = detector.draw_detections(image.copy(), detections)
-                        result_image_rgb = cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)
-                        
-                        with col2:
-                            st.subheader("检测结果")
-                            st.image(result_image_rgb, use_column_width=True)
-                        
-                        # 显示统计信息
-                        stats = detector.get_detection_statistics(detections)
-                        
-                        st.subheader("检测统计")
-                        col3, col4, col5 = st.columns(3)
-                        
-                        with col3:
-                            st.metric("总检测数", stats['total_count'])
-                        
-                        with col4:
-                            stages = list(stats['by_stage_chinese'].keys())
-                            if stages:
-                                main_stage = max(stats['by_stage_chinese'], key=stats['by_stage_chinese'].get)
-                                st.metric("主要物候期", main_stage)
-                        
-                        with col5:
-                            if detections:
-                                avg_confidence = np.mean([det['confidence'] for det in detections])
-                                st.metric("平均置信度", f"{avg_confidence:.2f}")
-                        
-                        # 详细检测结果
-                        st.subheader("详细检测结果")
-                        if detections:
-                            for i, det in enumerate(detections):
-                                with st.expander(f"检测目标 {i+1}: {det['class_chinese']} (置信度: {det['confidence']:.2f})"):
-                                    st.json(det)
-                        else:
-                            st.info("未检测到松花目标")
-                    else:
-                        st.error("无法读取图片文件")
+                st.info("未检测到松花目标")
 
         except Exception as e:
             st.error(f"处理文件时出错: {e}")
             logger.error(f"处理文件失败: {e}")
-        
-        finally:
-            # 清理临时文件
-            try:
-                os.unlink(tmp_path)
-            except:
-                pass
 
     # 侧边栏信息
     with st.sidebar:
@@ -275,7 +272,7 @@ def main():
         if detector.model is not None:
             st.success("✅ 模型加载成功")
         else:
-            st.error("❌ 模型加载失败")
+            st.error("❌ 模型加载失败 - 使用模拟检测模式")
 
 if __name__ == '__main__':
     main()
