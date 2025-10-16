@@ -1,26 +1,25 @@
-from flask import Flask, render_template, request, jsonify, send_file
-import os
+import streamlit as st
 import cv2
 import numpy as np
 import torch
 from datetime import datetime
 import logging
 import json
-from werkzeug.utils import secure_filename
-import threading
+import os
 from collections import defaultdict
+from ultralytics import YOLO
+import tempfile
+
+# 配置页面
+st.set_page_config(
+    page_title="松花物候期检测平台",
+    page_icon="🌲",
+    layout="wide"
+)
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB限制
-app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'mp4', 'avi', 'mov'}
-
-# 确保目录存在
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # 松花时期类别映射
 PINE_FLOWER_CLASSES = {
@@ -28,7 +27,6 @@ PINE_FLOWER_CLASSES = {
     1: {'name': 'ripening stage', 'color': (0, 165, 255), 'chinese': '成熟期'},
     2: {'name': 'decline stage', 'color': (0, 0, 255), 'chinese': '衰退期'}
 }
-
 
 class AdvancedDetector:
     def __init__(self, model_path):
@@ -41,28 +39,20 @@ class AdvancedDetector:
         """加载YOLOv11模型"""
         try:
             logger.info("正在加载YOLOv11模型...")
-            from ultralytics import YOLO
             self.model = YOLO(self.model_path)
             logger.info("模型加载成功！")
             logger.info(f"模型类别: {self.model.names}")
         except Exception as e:
             logger.error(f"模型加载失败: {e}")
-            logger.info("切换到模拟检测模式")
+            st.error(f"模型加载失败: {e}")
             self.model = None
 
-    def detect_image(self, image_path):
+    def detect_image(self, image):
         """执行图片检测"""
         try:
-            # 读取图像
-            image = cv2.imread(image_path)
-            if image is None:
-                raise ValueError("无法读取图像")
-
-            original_image = image.copy()
-
             # 如果有真实模型，使用真实检测
             if self.model is not None:
-                results = self.model(image_path)
+                results = self.model(image)
                 detections = []
                 for result in results:
                     for box in result.boxes:
@@ -83,119 +73,12 @@ class AdvancedDetector:
                 # 使用模拟检测
                 detections = self.mock_detect(image)
 
-            return detections, original_image
+            return detections
 
         except Exception as e:
             logger.error(f"图片检测失败: {e}")
-            return self.mock_detect(image), original_image
-
-    def detect_video(self, video_path):
-        """执行视频检测"""
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                raise ValueError("无法打开视频文件")
-
-            # 获取视频信息
-            fps = int(cap.get(cv2.CAP_PROP_FPS))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            # 创建输出视频路径
-            output_filename = f"result_{os.path.basename(video_path)}"
-            output_path = os.path.join(app.config['UPLOAD_FOLDER'], output_filename)
-
-            # 创建视频写入器
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-            frame_count = 0
-            video_detections = []
-
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                # 每5帧检测一次以提高性能
-                if frame_count % 5 == 0 or frame_count == 0:
-                    if self.model is not None:
-                        # 使用YOLO模型检测
-                        results = self.model(frame)
-                        frame_detections = []
-                        for result in results:
-                            for box in result.boxes:
-                                class_id = int(box.cls.item())
-                                class_info = PINE_FLOWER_CLASSES.get(class_id,
-                                                                     {'name': 'unknown', 'color': (255, 255, 255),
-                                                                      'chinese': '未知时期'})
-
-                                frame_detections.append({
-                                    'bbox': box.xyxy[0].tolist(),
-                                    'confidence': box.conf.item(),
-                                    'class_name': class_info['name'],
-                                    'class_chinese': class_info['chinese'],
-                                    'class_id': class_id,
-                                    'color': class_info['color'],
-                                    'frame': frame_count
-                                })
-                    else:
-                        frame_detections = self.mock_detect(frame)
-
-                    video_detections.extend(frame_detections)
-
-                # 绘制检测框
-                result_frame = self.draw_detections(frame.copy(), frame_detections if frame_count % 5 == 0 else [])
-                out.write(result_frame)
-
-                frame_count += 1
-
-                # 显示进度（每50帧）
-                if frame_count % 50 == 0:
-                    logger.info(f"视频处理进度: {frame_count}/{total_frames}")
-
-            cap.release()
-            out.release()
-
-            return video_detections, output_filename
-
-        except Exception as e:
-            logger.error(f"视频检测失败: {e}")
-            return [], None
-
-    def mock_detect(self, image):
-        """模拟检测结果 - 用于测试界面"""
-        height, width = image.shape[:2]
-        detections = []
-
-        # 生成2-4个随机检测框
-        import random
-        num_detections = random.randint(2, 4)
-
-        for i in range(num_detections):
-            # 随机位置和大小
-            x1 = random.randint(50, width - 150)
-            y1 = random.randint(50, height - 150)
-            x2 = x1 + random.randint(80, 200)
-            y2 = y1 + random.randint(80, 200)
-
-            confidence = round(0.7 + random.random() * 0.25, 2)  # 0.7-0.95
-
-            # 随机选择松花时期
-            class_id = random.randint(0, 2)
-            class_info = PINE_FLOWER_CLASSES[class_id]
-
-            detections.append({
-                'bbox': [x1, y1, x2, y2],
-                'confidence': confidence,
-                'class_name': class_info['name'],
-                'class_chinese': class_info['chinese'],
-                'class_id': class_id,
-                'color': class_info['color']
-            })
-
-        return detections
+            st.error(f"图片检测失败: {e}")
+            return []
 
     def draw_detections(self, image, detections):
         """绘制检测框"""
@@ -240,106 +123,127 @@ class AdvancedDetector:
 
         return stats
 
-
 # 初始化检测器
-detector = AdvancedDetector('models/best.pt')
+@st.cache_resource
+def load_detector():
+    return AdvancedDetector('YOLOv11-PMC-PhaseNet.pt')
 
+# 主应用
+def main():
+    st.title("🌲 松花物候期检测平台")
+    st.markdown("上传松花图片或视频，自动识别物候期（伸长期、成熟期、衰退期）")
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+    # 初始化检测器
+    detector = load_detector()
 
+    # 文件上传
+    uploaded_file = st.file_uploader(
+        "选择图片或视频文件", 
+        type=['png', 'jpg', 'jpeg', 'mp4', 'avi', 'mov'],
+        help="支持格式: PNG, JPG, JPEG, MP4, AVI, MOV"
+    )
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+    if uploaded_file is not None:
+        # 保存上传的文件到临时文件
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+            tmp_file.write(uploaded_file.getvalue())
+            tmp_path = tmp_file.name
 
-
-@app.route('/detect', methods=['POST'])
-def detect():
-    if 'file' not in request.files:
-        return jsonify({'error': '没有选择文件'}), 400
-
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': '没有选择文件'}), 400
-
-    if file and allowed_file(file.filename):
         try:
-            # 保存文件
-            filename = secure_filename(f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}")
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
+            file_ext = os.path.splitext(uploaded_file.name)[1].lower()
 
-            # 根据文件类型执行检测
-            file_ext = filename.rsplit('.', 1)[1].lower()
-
-            if file_ext in ['mp4', 'avi', 'mov']:
-                # 视频检测
-                detections, result_filename = detector.detect_video(filepath)
-                result_type = 'video'
+            if file_ext in ['.mp4', '.avi', '.mov']:
+                # 视频处理
+                st.warning("视频处理功能在演示版本中可能受限")
+                st.video(uploaded_file)
+                
             else:
-                # 图片检测
-                detections, original_image = detector.detect_image(filepath)
+                # 图片处理
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("原图")
+                    # 显示原图
+                    image = cv2.imread(tmp_path)Image = cv2.imread（tmp_path）
+                    if image is not None:
+                        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                        st.image(image_rgb, use_column_width=True)st.image   图像 (image_rgb use_column_width = True   真正的)
+                    
+                        # 执行检测
+                        with st.spinner("正在检测松花物候期..."):
+                            detections = detector.detect_image(image)Detections = detector.detect_image（图像）
+                        
+                        # 绘制检测结果
+                        result_image = detector.draw_detections(image.copy(), detections)Result_image = detector.draw_detections(图像；副本(),检测)
+                        result_image_rgb = cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)Result_image_rgb = cv2。cvtColor (result_image cv2。COLOR_BGR2RGB)
+                        
+                        with col2:   col2:
+                            st.subheader("检测结果")
+                            st.image(result_image_rgb, use_column_width=True)st.image   图像 (result_image_rgb use_column_width = True   真正的)
+                        
+                        # 显示统计信息
+                        stats = detector.get_detection_statistics(detections)Stats = detector.get_detection_statistics（检测）
+                        
+                        st.subheader("检测统计")
+                        col3, col4, col5 = st.columns(3)Col3, col4, col5 = st.columns(3)
+                        
+                        with col3:   col3:
+                            st.metric("总检测数", stats['total_count'])
+                        
+                        with col4:   col4:
+                            stages = list(stats['by_stage_chinese'].keys())阶段= list（stats['by_stage_chinese'   “by_stage_chinese”].keys   键()）
+                            if   如果 stages:
+                                main_stage = max(stats['by_stage_chinese'], key=stats['by_stage_chinese'].get)Main_stage = max（stats['by_stage_chinese'   “by_stage_chinese”], key=stats['by_stage_chinese'   “by_stage_chinese”].get）
+                                st.metric("主要物候期", main_stage)
+                        
+                        with col5:   col5:
+                            if detections:
+                                avg_confidence = np.mean([det['confidence'] for det in detections])Avg_confidence = np。平均值（[det[‘置信度’]在检测中的det]）
+                                st.metric("平均置信度", f"{avg_confidence:.2f}")
+                        
+                        # 详细检测结果
+                        st.subheader("详细检测结果")
+                        if detections:   如果检测:
+                            for i, det in enumerate(detections):对于i， det in   在 enumerate   列举(detections)：
+                                with st.expander(f"检测目标 {i+1}: {det['class_chinese']} (置信度: {det['confidence']:.2f})"):with   与 st.expander   扩张器(f"检测目标 {i 1}: {det['class_chinese'   “class_chinese”]} (置信度: {det['confidence'   “信心”]:.2f})"):
+                                    st.json(det)   st.json(依据)
+                        else:   其他:
+                            st.info("未检测到松花目标")
+                    
+                else:   其他:
+                    st.error("无法读取图片文件")
 
-                # 确保 detections 是列表
-                if detections is None:
-                    detections = []
+        except Exception as e:   例外情况如下：
+            st.error(f"处理文件时出错: {e}")
+            logger.error(f"处理文件失败: {e}")
+        
+        finally:   最后:
+            # 清理临时文件
+            try:   试一试:
+                os.unlink(tmp_path)
+            except:   除了:
+                pass   通过
 
-                # 绘制结果图片
-                result_image = detector.draw_detections(original_image.copy(), detections)
+    # 侧边栏信息
+    with st.sidebar:   st.sidebar   侧边栏:
+        st.header("关于")
+        st.markdown("""
+        ### 松花物候期检测系统
+        - **伸长期**: 绿色边框
+        - **成熟期**: 橙色边框  
+        - **衰退期**: 红色边框
+        
+        ### 技术支持
+        - YOLOv11 目标检测
+        - 深度学习模型
+        - 实时物候期识别
+        """)
+        
+        st.header("模型状态")
+        if detector.model is not None:如果探测器。model不是None：
+            st.success("✅ 模型加载成功")
+        else:   其他:
+            st.error("❌ 模型加载失败")
 
-                # 保存结果图片
-                result_filename = f"result_{filename}"
-                result_path = os.path.join(app.config['UPLOAD_FOLDER'], result_filename)
-                cv2.imwrite(result_path, result_image)
-                result_type = 'image'
-
-            # 确保获取统计信息
-            stats = detector.get_detection_statistics(detections) if detections else {
-                'total_count': 0,
-                'by_stage': {},
-                'by_stage_chinese': {}
-            }
-
-            return jsonify({
-                'success': True,
-                'original_file': filename,
-                'result_file': result_filename,
-                'detections': detections if detections else [],
-                'statistics': stats,
-                'result_type': result_type,
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            })
-
-        except Exception as e:
-            logger.error(f"处理失败: {e}")
-            # 返回一个包含默认值的错误响应
-            return jsonify({
-                'success': False,
-                'error': f'处理失败: {str(e)}',
-                'detections': [],
-                'statistics': {
-                    'total_count': 0,
-                    'by_stage': {},
-                    'by_stage_chinese': {}
-                }
-            }), 500
-
-    return jsonify({'error': '不支持的文件格式'}), 400
-
-@app.route('/uploads/<filename>')
-def serve_file(filename):
-    return send_file(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-
-
-@app.route('/get_progress')
-def get_progress():
-    """获取处理进度（用于视频处理）"""
-    # 这里可以实现进度跟踪，简化版本直接返回完成
-    return jsonify({'progress': 100, 'status': 'completed'})
-
-
-if __name__ == '__main__':
-    logger.info("启动高级松花检测平台...")
-    app.run(debug=True, host='127.0.0.1', port=5000)
+if __name__ == '__main__':   如果__name__ == '__main__'   “__main__ '：
+    main()
