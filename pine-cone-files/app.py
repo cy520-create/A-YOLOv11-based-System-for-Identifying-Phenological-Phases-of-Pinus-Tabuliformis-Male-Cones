@@ -242,9 +242,8 @@ def main():
                                     st.json(det)
                         else:
                             st.info("未检测到松花目标")
-                    
-                else:
-                    st.error("无法读取图片文件")
+                    else:
+                        st.error("无法读取图片文件")
 
         except Exception as e:
             st.error(f"处理文件时出错: {e}")
