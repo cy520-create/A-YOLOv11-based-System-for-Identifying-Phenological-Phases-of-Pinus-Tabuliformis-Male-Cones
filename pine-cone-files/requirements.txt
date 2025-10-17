@@ -1,4 +1,9 @@
 streamlit
-numpy
-pillow
-
+flask==2.3.3
+opencv-python-headless==4.8.1.78
+numpy==1.24.3
+torch==2.0.1
+torchvision==0.15.2
+ultralytics==8.0.186
+pillow==10.0.0
+requests
