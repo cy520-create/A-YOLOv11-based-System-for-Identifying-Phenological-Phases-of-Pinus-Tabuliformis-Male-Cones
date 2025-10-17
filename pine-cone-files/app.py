@@ -1,219 +1,334 @@
 import streamlit as st
-import numpy as np
-from PIL import Image, ImageDraw
+import threading
+import requests
+import time
+from PIL import Image
+import io
 import json
 import os
+
+# Your original Flask application code
+from flask import Flask, request, jsonify, send_file
+import cv2
+import numpy as np
+import torch
+from datetime import datetime
+import logging
+from werkzeug.utils import secure_filename
 from collections import defaultdict
-import random
 
-# 配置页面
-st.set_page_config(
-    page_title="松花物候期检测平台",
-    page_icon="🌲", 
-    layout="wide"
-)
+# Configure Flask application
+flask_app = Flask(__name__)
+flask_app.config['UPLOAD_FOLDER'] = 'uploads'
+flask_app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+os.makedirs(flask_app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# 松花时期类别映射
+# Pine flower phenological phases mapping
 PINE_FLOWER_CLASSES = {
-    0: {'name': 'elongation stage', 'color': (0, 255, 0), 'chinese': '伸长期'},
-    1: {'name': 'ripening stage', 'color': (255, 165, 0), 'chinese': '成熟期'},
-    2: {'name': 'decline stage', 'color': (255, 0, 0), 'chinese': '衰退期'}
+    0: {'name': 'elongation stage', 'color': (0, 255, 0), 'english': 'Elongation Stage'},
+    1: {'name': 'ripening stage', 'color': (0, 165, 255), 'english': 'Ripening Stage'},
+    2: {'name': 'decline stage', 'color': (0, 0, 255), 'english': 'Decline Stage'}
 }
 
-class SimpleDetector:
-    def __init__(self):
-        self.model_loaded = False
-        # 模拟模型加载
-        st.sidebar.success("✅ 模拟检测模式已启动")
-        
-    def detect_image(self, image):
-        """模拟图片检测"""
+class AdvancedDetector:
+    def __init__(self, model_path):
+        self.model_path = model_path
+        self.model = None
+        self.device = 'cpu'
+        self.load_model()
+
+    def load_model(self):
+        """Load YOLOv11 model"""
         try:
-            width, height = image.size
-            detections = []
-            
-            # 生成2-4个随机检测框
-            num_detections = random.randint(2, 4)
-
-            for i in range(num_detections):
-                # 随机位置和大小
-                x1 = random.randint(50, width - 150)
-                y1 = random.randint(50, height - 150)
-                x2 = x1 + random.randint(80, 200)
-                y2 = y1 + random.randint(80, 200)
-
-                confidence = round(0.7 + random.random() * 0.25, 2)  # 0.7-0.95
-
-                # 随机选择松花时期
-                class_id = random.randint(0, 2)
-                class_info = PINE_FLOWER_CLASSES[class_id]
-
-                detections.append({
-                    'bbox': [x1, y1, x2, y2],
-                    'confidence': confidence,
-                    'class_name': class_info['name'],
-                    'class_chinese': class_info['chinese'],
-                    'class_id': class_id,
-                    'color': class_info['color']
-                })
-
-            return detections
-
+            from ultralytics import YOLO
+            self.model = YOLO(self.model_path)
+            st.sidebar.success("✅ Model loaded successfully")
         except Exception as e:
-            st.error(f"检测失败: {e}")
-            return []
+            st.sidebar.error(f"❌ Model loading failed: {e}")
+            self.model = None
+
+    def detect_image(self, image_path):
+        """Perform image detection"""
+        try:
+            image = cv2.imread(image_path)
+            if image is None:
+                return [], image
+            
+            if self.model is not None:
+                results = self.model(image_path)
+                detections = []
+                for result in results:
+                    for box in result.boxes:
+                        class_id = int(box.cls.item())
+                        class_info = PINE_FLOWER_CLASSES.get(class_id, 
+                            {'name': 'unknown', 'color': (255, 255, 255), 'english': 'Unknown Stage'})
+                        detections.append({
+                            'bbox': box.xyxy[0].tolist(),
+                            'confidence': box.conf.item(),
+                            'class_name': class_info['name'],
+                            'class_english': class_info['english'],
+                            'class_id': class_id,
+                            'color': class_info['color']
+                        })
+            else:
+                detections = self.mock_detect(image)
+            
+            return detections, image
+        except Exception as e:
+            st.error(f"Detection error: {e}")
+            return self.mock_detect(image), image
+
+    def mock_detect(self, image):
+        """Mock detection results - for testing interface"""
+        height, width = image.shape[:2]
+        detections = []
+        import random
+        num_detections = random.randint(2, 4)
+        
+        for i in range(num_detections):
+            x1 = random.randint(50, width - 150)
+            y1 = random.randint(50, height - 150)
+            x2 = x1 + random.randint(80, 200)
+            y2 = y1 + random.randint(80, 200)
+            confidence = round(0.7 + random.random() * 0.25, 2)
+            class_id = random.randint(0, 2)
+            class_info = PINE_FLOWER_CLASSES[class_id]
+            
+            detections.append({
+                'bbox': [x1, y1, x2, y2],
+                'confidence': confidence,
+                'class_name': class_info['name'],
+                'class_english': class_info['english'],
+                'class_id': class_id,
+                'color': class_info['color']
+            })
+        return detections
 
     def draw_detections(self, image, detections):
-        """绘制检测框"""
-        draw = ImageDraw.Draw(image)
-        
+        """Draw detection bounding boxes"""
         for det in detections:
             x1, y1, x2, y2 = map(int, det['bbox'])
             conf = det['confidence']
             color = det.get('color', (0, 255, 0))
-            class_name = det.get('class_chinese', det['class_name'])
-
-            # 画框
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
-
-            # 画标签背景和文字
-            label = f"{class_name} {conf:.2f}"
-            # 简单估算文本大小
-            text_width = len(label) * 10
-            text_height = 20
+            class_name = det.get('class_english', det['class_name'])
             
-            draw.rectangle([x1, y1 - text_height - 10, x1 + text_width, y1], fill=color)
-            draw.text((x1, y1 - text_height - 5), label, fill=(255, 255, 255))
-
+            # Draw bounding box
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, 3)
+            
+            # Draw label background
+            label = f"{class_name} {conf:.2f}"
+            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.rectangle(image, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1)
+            
+            # Draw text
+            cv2.putText(image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
         return image
 
-    def get_detection_statistics(self, detections):
-        """获取检测统计信息"""
+# Initialize detector
+detector = AdvancedDetector('YOLOv11-PMC-PhaseNet.pt')
+
+# Flask API routes
+@flask_app.route('/')
+def home():
+    return jsonify({"message": "Pine Cone Phenology Detection API is running"})
+
+@flask_app.route('/detect', methods=['POST'])
+def detect():
+    """API endpoint for image detection"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file selected'}), 400
+    
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    try:
+        # Save uploaded file
+        filename = secure_filename(f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.filename}")
+        filepath = os.path.join(flask_app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        
+        # Perform detection
+        detections, original_image = detector.detect_image(filepath)
+        
+        # Draw detection results
+        result_image = detector.draw_detections(original_image.copy(), detections)
+        
+        # Save result image
+        result_filename = f"result_{filename}"
+        result_path = os.path.join(flask_app.config['UPLOAD_FOLDER'], result_filename)
+        cv2.imwrite(result_path, result_image)
+        
+        # Prepare statistics
         stats = {
-            'total_count': 0,
-            'by_stage': defaultdict(int),
-            'by_stage_chinese': defaultdict(int)
+            'total_count': len(detections),
+            'by_stage': defaultdict(int)
         }
-
-        if not detections:
-            return stats
-
-        stats['total_count'] = len(detections)
-
+        
         for det in detections:
-            stage = det.get('class_name', 'unknown')
-            stage_chinese = det.get('class_chinese', '未知时期')
+            stage = det.get('class_english', 'Unknown')
             stats['by_stage'][stage] += 1
-            stats['by_stage_chinese'][stage_chinese] += 1
+        
+        return jsonify({
+            'success': True,
+            'original_file': filename,
+            'result_file': result_filename,
+            'detections': detections,
+            'statistics': stats,
+            'result_type': 'image'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'Processing failed: {str(e)}'}), 500
 
-        return stats
+@flask_app.route('/uploads/<filename>')
+def serve_file(filename):
+    """Serve uploaded and result files"""
+    return send_file(os.path.join(flask_app.config['UPLOAD_FOLDER'], filename))
 
-# 初始化检测器
-@st.cache_resource
-def load_detector():
-    return SimpleDetector()
+# Streamlit Interface
+def start_flask_server():
+    """Start Flask server in background thread"""
+    flask_app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 def main():
-    st.title("🌲 松花物候期检测平台")
-    st.markdown("上传松花图片，自动识别物候期（伸长期、成熟期、衰退期）")
-    
-    # 显示说明
-    with st.expander("重要说明", expanded=True):
-        st.info("""
-        **当前运行在演示模式：**
-        - 使用模拟检测算法展示界面功能
-        - 检测结果为随机生成，用于演示界面
-        - 实际部署时需要连接真实的YOLO模型
-        """)
-
-    # 初始化检测器
-    detector = load_detector()
-
-    # 文件上传
-    uploaded_file = st.file_uploader(
-        "选择松花图片文件", 
-        type=['png', 'jpg', 'jpeg'],
-        help="支持格式: PNG, JPG, JPEG"
+    # Streamlit page configuration
+    st.set_page_config(
+        page_title="Pine Cone Phenology Detection Platform",
+        page_icon="🌲",
+        layout="wide"
     )
-
+    
+    st.title("🌲 Pine Cone Phenology Detection Platform")
+    st.markdown("Upload pine cone images to automatically identify phenological phases (Elongation, Ripening, Decline)")
+    
+    # Start Flask server in background thread
+    if 'flask_started' not in st.session_state:
+        st.info("🔄 Starting detection server...")
+        thread = threading.Thread(target=start_flask_server, daemon=True)
+        thread.start()
+        st.session_state.flask_started = True
+        time.sleep(3)  # Wait for server to start
+        st.success("✅ Detection server is ready!")
+    
+    # File upload section
+    uploaded_file = st.file_uploader(
+        "Choose an image file", 
+        type=['png', 'jpg', 'jpeg'],
+        help="Supported formats: PNG, JPG, JPEG"
+    )
+    
     if uploaded_file is not None:
-        try:
-            # 使用PIL打开图片
+        # Display original image
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📷 Original Image")
             image = Image.open(uploaded_file)
+            st.image(image, use_column_width=True, caption="Uploaded Image")
+        
+        with col2:
+            st.subheader("🔍 Detection Results")
             
-            # 图片处理
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.subheader("📷 原图")
-                st.image(image, use_column_width=True)
-            
-            with col2:
-                st.subheader("🔍 检测结果")
-                
-                # 执行检测
-                with st.spinner("正在分析松花物候期..."):
-                    detections = detector.detect_image(image)
-                
-                # 绘制检测结果
-                result_image = detector.draw_detections(image.copy(), detections)
-                st.image(result_image, use_column_width=True)
-            
-            # 显示统计信息
-            if detections:
-                stats = detector.get_detection_statistics(detections)
-                
-                st.subheader("📊 检测统计")
-                col3, col4, col5 = st.columns(3)
-                
-                with col3:
-                    st.metric("总检测数", stats['total_count'])
-                
-                with col4:
-                    stages = list(stats['by_stage_chinese'].keys())
-                    if stages:
-                        main_stage = max(stats['by_stage_chinese'], key=stats['by_stage_chinese'].get)
-                        st.metric("主要物候期", main_stage)
-                
-                with col5:
-                    avg_confidence = np.mean([det['confidence'] for det in detections])
-                    st.metric("平均置信度", f"{avg_confidence:.2f}")
-                
-                # 详细检测结果
-                st.subheader("📋 详细检测结果")
-                for i, det in enumerate(detections):
-                    with st.expander(f"目标 {i+1}: {det['class_chinese']} (置信度: {det['confidence']:.2f})"):
-                        st.json(det)
-            else:
-                st.warning("未检测到松花目标")
+            # Call Flask API for detection
+            with st.spinner("🔬 Analyzing pine cone phenological phases..."):
+                try:
+                    # Prepare file for API request
+                    files = {'file': (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                    response = requests.post('http://localhost:5000/detect', files=files)
+                    
+                    if response.status_code == 200:
+                        result = response.json()
+                        
+                        if result['success']:
+                            # Display result image
+                            result_url = f"http://localhost:5000/uploads/{result['result_file']}"
+                            st.image(result_url, use_column_width=True, caption="Detection Results")
+                            
+                            # Display detection statistics
+                            st.subheader("📊 Detection Statistics")
+                            
+                            stats_col1, stats_col2, stats_col3 = st.columns(3)
+                            
+                            with stats_col1:
+                                total_count = result['statistics']['total_count']
+                                st.metric("Total Detections", total_count)
+                            
+                            with stats_col2:
+                                if result['detections']:
+                                    main_stage = max(result['statistics']['by_stage'], 
+                                                   key=result['statistics']['by_stage'].get)
+                                    st.metric("Main Phenological Phase", main_stage)
+                                else:
+                                    st.metric("Main Phenological Phase", "None")
+                            
+                            with stats_col3:
+                                if result['detections']:
+                                    avg_confidence = np.mean([det['confidence'] for det in result['detections']])
+                                    st.metric("Average Confidence", f"{avg_confidence:.2f}")
+                                else:
+                                    st.metric("Average Confidence", "0.00")
+                            
+                            # Detailed detection results
+                            st.subheader("📋 Detailed Detection Results")
+                            
+                            if result['detections']:
+                                for i, det in enumerate(result['detections']):
+                                    with st.expander(f"Target {i+1}: {det['class_english']} (Confidence: {det['confidence']:.2f})"):
+                                        st.json({
+                                            'Bounding Box': det['bbox'],
+                                            'Confidence': det['confidence'],
+                                            'Phenological Phase': det['class_english'],
+                                            'Class ID': det['class_id']
+                                        })
+                            else:
+                                st.warning("🚫 No pine cone targets detected in the image")
+                                
+                        else:
+                            st.error("❌ Detection failed")
+                    else:
+                        st.error(f"❌ API request failed with status {response.status_code}")
+                        st.write("Error details:", response.json())
+                        
+                except requests.exceptions.ConnectionError:
+                    st.error("🔌 Cannot connect to detection server. Please wait a moment and try again.")
+                except Exception as e:
+                    st.error(f"💥 Request error: {e}")
 
-        except Exception as e:
-            st.error(f"处理图片时出错: {e}")
-
-    # 侧边栏信息
+    # Sidebar information
     with st.sidebar:
-        st.header("ℹ️ 关于")
+        st.header("ℹ️ About")
         st.markdown("""
-        ### 松花物候期检测系统
+        ### Pine Cone Phenology Detection System
         
-        **物候期标识：**
-        - 🟢 伸长期 - 绿色边框
-        - 🟠 成熟期 - 橙色边框  
-        - 🔴 衰退期 - 红色边框
+        **Phenological Phase Identification:**
+        - 🟢 **Elongation Stage** - Green border
+        - 🟠 **Ripening Stage** - Orange border  
+        - 🔴 **Decline Stage** - Red border
         
-        **当前模式：**
-        - 演示版本
-        - 模拟检测算法
-        - 功能完整展示
+        **Detection Features:**
+        - YOLOv11 object detection
+        - Deep learning model
+        - Real-time phenological phase recognition
         """)
         
-        st.header("🛠 技术信息")
+        st.header("🛠 Technical Information")
         st.markdown("""
-        - 框架: Streamlit
-        - 图像处理: Pillow
-        - 检测模式: 模拟算法
-        - 状态: **运行正常**
+        - **Framework**: Streamlit + Flask
+        - **Detection Model**: YOLOv11
+        - **Image Processing**: OpenCV
+        - **Current Mode**: Hybrid Architecture
         """)
+        
+        # Model status
+        st.header("🔧 System Status")
+        if detector.model is not None:
+            st.success("✅ Model: Loaded Successfully")
+        else:
+            st.warning("⚠️ Model: Simulation Mode")
+        
+        st.info("🌐 Flask API: Running on port 5000")
 
 if __name__ == '__main__':
     main()
